@@ -239,11 +239,14 @@ static bool connectCube() {
 // --- Status LED --------------------------------------------------------------
 // Fast blink: no WiFi. Slow blink: no cube. Double blink: the last side couldn't be sent to EARLY
 // (API error or no clock; it is retried). Short flash every 5 s: all good, and the board is alive.
+// On a flip: steady on while the new side is being sent, then three quick blinks once EARLY has it.
 // Runs in its own task because WiFi, scanning and HTTP calls block the loop for seconds.
 
 static const int LED_PIN = 2;  // blue LED on ESP32 DevKit boards
 enum class Status { NoWifi, NoCube, ApiError, Ok };
 static volatile Status status = Status::NoWifi;
+static volatile bool switching = false;
+static volatile uint32_t confirmedAt = 0;  // millis() of the last successful switch, 0: none
 
 static bool ledOn(Status s, uint32_t tick) {  // 100 ms per tick
   switch (s) {
@@ -258,7 +261,11 @@ static bool ledOn(Status s, uint32_t tick) {  // 100 ms per tick
 static void ledTask(void*) {
   pinMode(LED_PIN, OUTPUT);
   for (uint32_t tick = 0;; tick++) {
-    digitalWrite(LED_PIN, ledOn(status, tick));
+    uint32_t sinceConfirm = millis() - confirmedAt;
+    bool on = confirmedAt && sinceConfirm < 600 ? sinceConfirm / 100 % 2 == 0
+              : switching                     ? true
+                                              : ledOn(status, tick);
+    digitalWrite(LED_PIN, on);
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
@@ -310,6 +317,7 @@ void loop() {
   int side = reportedSide;
   uint32_t flippedAt = reportedAt;
   if (side == appliedSide) apiFailing = false;  // flipped back, nothing left to send
+  switching = side >= 0 && side != appliedSide && !apiFailing;
   bool settled = millis() - flippedAt >= SETTLE_MS;
   bool retryDue = lastAttempt == 0 || millis() - lastAttempt >= RETRY_MS;
   if (side >= 0 && side != appliedSide && settled && retryDue) {
@@ -320,6 +328,8 @@ void loop() {
     if (!apiFailing) {
       appliedSide = side;
       lastAttempt = 0;
+      switching = false;
+      confirmedAt = millis();
       LOG("Done");
     }
   }

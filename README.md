@@ -32,6 +32,8 @@ The blue LED on the DevKit (GPIO 2):
 | slow blink | cube not connected |
 | double blink | the last side couldn't be sent to EARLY (API error or no clock); it is retried |
 | short flash every 5 s | all good |
+| steady on after a flip | sending the new side to EARLY |
+| three quick blinks | EARLY has the new side |
 
 ## Setup
 
