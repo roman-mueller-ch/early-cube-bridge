@@ -168,10 +168,28 @@ static bool connectCube() {
   return true;
 }
 
+// --- Status LED --------------------------------------------------------------
+// Fast blink: no WiFi. Slow blink: no cube. Off: all good.
+// Runs in its own task because WiFi, scanning and HTTP calls block the loop for seconds.
+
+static const int LED_PIN = 2;  // blue LED on ESP32 DevKit boards
+enum class Status { NoWifi, NoCube, Ok };
+static volatile Status status = Status::NoWifi;
+
+static void ledTask(void*) {
+  pinMode(LED_PIN, OUTPUT);
+  for (uint32_t tick = 0;; tick++) {  // 100 ms per tick
+    bool on = status == Status::NoWifi ? tick % 2 == 0 : status == Status::NoCube ? tick % 10 < 5 : false;
+    digitalWrite(LED_PIN, on);
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
 // --- Main --------------------------------------------------------------------
 
 static bool ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) return true;
+  status = Status::NoWifi;
   LOG("Connecting to WiFi");
   if (wifi.run(15000) != WL_CONNECTED) return false;
   LOG("WiFi connected to %s, IP %s", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
@@ -183,6 +201,7 @@ static bool clockSet() { return time(nullptr) > 1700000000; }
 void setup() {
   Serial.begin(115200);
   LOG("EARLY cube bridge");
+  xTaskCreate(ledTask, "led", 2048, nullptr, 1, nullptr);
 
   WiFi.mode(WIFI_STA);
   for (const Network& network : NETWORKS) {
@@ -206,9 +225,11 @@ void loop() {
     return;
   }
   if (!client || !client->isConnected()) {
+    status = Status::NoCube;
     if (!connectCube()) delay(2000);
     return;
   }
+  status = Status::Ok;
 
   int side = reportedSide;
   bool settled = millis() - reportedAt >= SETTLE_MS;

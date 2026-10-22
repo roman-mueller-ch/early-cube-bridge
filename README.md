@@ -16,6 +16,10 @@ The cube needs no pairing. It exposes the side facing up as a single byte (1-8, 
 
 Before switching, the bridge checks `GET /tracking`: if the activity for the side is already running, it leaves it alone. So after a restart or a lost connection the bridge simply syncs EARLY to the cube without splitting the current entry.
 
+## Status LED
+
+The blue LED on the DevKit (GPIO 2) blinks fast while there is no WiFi, slowly while the cube isn't connected, and is off when everything works.
+
 ## Setup
 
 1. Create an API key and secret in the EARLY web app (Settings → API).
