@@ -1,9 +1,12 @@
 // Copy to config.h (git-ignored) and fill in.
 #pragma once
 
-// Use a private network, not the company WiFi.
-#define WIFI_SSID ""
-#define WIFI_PASSWORD ""
+// WiFi networks to try, e.g. home and work; the strongest one in range wins.
+// 2.4 GHz WPA2-Personal only (no captive portals or 802.1X login).
+#define WIFI_NETWORKS {      \
+    {"", ""}, /* home */    \
+    {"", ""}, /* work */    \
+}
 
 // EARLY web app → Settings → API
 #define EARLY_API_KEY ""

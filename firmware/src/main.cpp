@@ -5,12 +5,12 @@
 #include <NimBLEDevice.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WiFiMulti.h>
 #include <time.h>
 
 #include "ca.h"
 #include "config.h"
 
-static_assert(sizeof(WIFI_SSID) > 1, "set WIFI_SSID in include/config.h");
 static_assert(sizeof(EARLY_API_KEY) > 1 && sizeof(EARLY_API_SECRET) > 1, "set the EARLY API key in include/config.h");
 
 #define LOG(fmt, ...) Serial.printf("[%6lu s] " fmt "\n", millis() / 1000, ##__VA_ARGS__)
@@ -20,6 +20,13 @@ static const NimBLEUUID ORIENTATION_SERVICE("c7e70010-c847-11e6-8175-8c89a55d403
 static const NimBLEUUID ORIENTATION("c7e70012-c847-11e6-8175-8c89a55d403c");  // uint8, side facing up
 static const uint32_t SETTLE_MS = 2000;  // ignore sides the cube only passes through while being flipped
 static const uint32_t RETRY_MS = 10000;
+
+struct Network {
+  const char* ssid;
+  const char* password;
+};
+static const Network NETWORKS[] = WIFI_NETWORKS;
+static WiFiMulti wifi;
 
 static const char* SIDES[] = SIDE_ACTIVITIES;
 static_assert(sizeof(SIDES) / sizeof(SIDES[0]) == 8, "SIDE_ACTIVITIES needs 8 entries");
@@ -155,11 +162,9 @@ static bool connectCube() {
 
 static bool ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) return true;
-  LOG("Connecting to WiFi %s", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  for (int i = 0; i < 30 && WiFi.status() != WL_CONNECTED; i++) delay(500);
-  if (WiFi.status() != WL_CONNECTED) return false;
-  LOG("WiFi connected, IP %s", WiFi.localIP().toString().c_str());
+  LOG("Connecting to WiFi");
+  if (wifi.run(15000) != WL_CONNECTED) return false;
+  LOG("WiFi connected to %s, IP %s", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
   return true;
 }
 
@@ -170,7 +175,9 @@ void setup() {
   LOG("EARLY cube bridge");
 
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
+  for (const Network& network : NETWORKS) {
+    if (*network.ssid) wifi.addAP(network.ssid, network.password);
+  }
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   tls.setCACert(ROOT_CA);
 
