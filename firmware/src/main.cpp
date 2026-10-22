@@ -49,14 +49,21 @@ static int request(const char* method, const String& path, const String& body, S
   return code;
 }
 
+static String jsonString(const String& json, const char* key) {  // first "key":"value", or ""
+  String needle = String("\"") + key + "\":\"";
+  int start = json.indexOf(needle);
+  if (start < 0) return "";
+  start += needle.length();
+  int end = json.indexOf('"', start);
+  return end < 0 ? "" : json.substring(start, end);
+}
+
 static bool signIn() {
   String res;
   String body = String("{\"apiKey\":\"") + EARLY_API_KEY + "\",\"apiSecret\":\"" + EARLY_API_SECRET + "\"}";
   if (request("POST", "/developer/sign-in", body, &res, false) != 200) return false;
-  int start = res.indexOf("\"token\":\"");
-  if (start < 0) return false;
-  start += 9;
-  token = res.substring(start, res.indexOf('"', start));
+  token = jsonString(res, "token");
+  if (token.isEmpty()) return false;
   LOG("Signed in to EARLY");
   return true;
 }
@@ -68,37 +75,63 @@ static int api(const char* method, const String& path, const String& body = "", 
   return code;
 }
 
-static String isoNow() {  // EARLY expects UTC without zone suffix
-  time_t now = time(nullptr);
+// EARLY timestamps are UTC without zone suffix, e.g. "2020-08-03T04:00:00.000".
+static String isoTime(time_t t) {
   struct tm utc;
-  gmtime_r(&now, &utc);
+  gmtime_r(&t, &utc);
   char buf[32];
   strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.000", &utc);
   return buf;
 }
+
+// Seconds since the epoch for a UTC date (newlib has no timegm).
+static time_t utcEpoch(int year, int month, int day, int hour, int min, int sec) {
+  year -= month <= 2;  // days_from_civil, see howardhinnant.github.io/date_algorithms.html
+  long era = (year >= 0 ? year : year - 399) / 400;
+  long yoe = year - era * 400;
+  long doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = era * 146097 + doe - 719468;
+  return (time_t)days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+static time_t parseIsoTime(const String& s) {  // 0 if unreadable
+  int y, mo, d, h, mi, se;
+  if (sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
+  return utcEpoch(y, mo, d, h, mi, se);
+}
+
+static const time_t MIN_ENTRY_S = 60;  // EARLY doesn't keep time entries shorter than a minute
 
 // Makes `activity` the running tracking (nullptr: nothing running). Leaves a matching tracking alone,
 // so syncing after a restart doesn't split the current entry.
 static bool switchTo(const char* activity) {
   String current;
   int code = api("GET", "/tracking", "", &current);
-  if (code < 0 || code >= 500) return false;
+  if (code != 200 && code != 404) return false;  // 404: nothing running
   bool running = code == 200;
   if (!running && !activity) return true;
   if (running && activity && current.indexOf(String("\"activity\":{\"id\":\"") + activity + "\"") >= 0) return true;
 
-  String now = isoNow();
+  time_t now = time(nullptr);
   if (running) {
-    code = api("POST", "/tracking/stop", "{\"stoppedAt\":\"" + now + "\"}");
-    if (code < 0 || code >= 500) return false;
-    if (code != 200) {
-      // shorter than the 1 minute EARLY accepts: drop it
+    time_t startedAt = parseIsoTime(jsonString(current, "startedAt"));
+    if (!startedAt) {
+      LOG("No startedAt in the current tracking: %s", current.substring(0, 200).c_str());
+      return false;
+    }
+    if (now - startedAt < MIN_ENTRY_S) {
+      // Too short to become a time entry, so cancel it. Only ever for a tracking we know is
+      // this short: a failed stop must never throw away a long entry.
       code = api("DELETE", "/tracking");
-      if (code < 0 || code >= 500) return false;
+      if (code != 200 && code != 404 && code != 409) return false;  // 404/409: already gone
+    } else {
+      code = api("POST", "/tracking/stop", "{\"stoppedAt\":\"" + isoTime(now) + "\"}");
+      if (code != 200 && code != 409) return false;  // 409: already stopped elsewhere
     }
   }
   if (!activity) return true;
-  code = api("POST", String("/tracking/") + activity + "/start", "{\"startedAt\":\"" + now + "\"}");
+  code = api("POST", String("/tracking/") + activity + "/start", "{\"startedAt\":\"" + isoTime(now) + "\"}");
   return code == 200 || code == 201;
 }
 
