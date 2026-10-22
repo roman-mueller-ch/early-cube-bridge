@@ -61,10 +61,10 @@ static bool signIn() {
   return true;
 }
 
-static int api(const char* method, const String& path, const String& body = "") {
+static int api(const char* method, const String& path, const String& body = "", String* response = nullptr) {
   if (token.isEmpty() && !signIn()) return -1;
-  int code = request(method, path, body, nullptr, true);
-  if (code == 401 && signIn()) code = request(method, path, body, nullptr, true);
+  int code = request(method, path, body, response, true);
+  if (code == 401 && signIn()) code = request(method, path, body, response, true);
   return code;
 }
 
@@ -77,15 +77,25 @@ static String isoNow() {  // EARLY expects UTC without zone suffix
   return buf;
 }
 
-// Stops whatever is running and starts `activity` (nullptr: just stop).
+// Makes `activity` the running tracking (nullptr: nothing running). Leaves a matching tracking alone,
+// so syncing after a restart doesn't split the current entry.
 static bool switchTo(const char* activity) {
-  String now = isoNow();
-  int code = api("POST", "/tracking/stop", "{\"stoppedAt\":\"" + now + "\"}");
+  String current;
+  int code = api("GET", "/tracking", "", &current);
   if (code < 0 || code >= 500) return false;
-  if (code != 200) {
-    // nothing running, or the entry is shorter than the 1 minute EARLY accepts: drop it
-    code = api("DELETE", "/tracking");
+  bool running = code == 200;
+  if (!running && !activity) return true;
+  if (running && activity && current.indexOf(String("\"activity\":{\"id\":\"") + activity + "\"") >= 0) return true;
+
+  String now = isoNow();
+  if (running) {
+    code = api("POST", "/tracking/stop", "{\"stoppedAt\":\"" + now + "\"}");
     if (code < 0 || code >= 500) return false;
+    if (code != 200) {
+      // shorter than the 1 minute EARLY accepts: drop it
+      code = api("DELETE", "/tracking");
+      if (code < 0 || code >= 500) return false;
+    }
   }
   if (!activity) return true;
   code = api("POST", String("/tracking/") + activity + "/start", "{\"startedAt\":\"" + now + "\"}");
@@ -188,10 +198,7 @@ void setup() {
 }
 
 void loop() {
-  // On boot the current side is only taken as the starting point, so a restart
-  // doesn't touch a tracking that was started or edited in the web app.
   static int appliedSide = -1;
-  static bool baseline = true;
   static uint32_t lastAttempt = 0;
 
   if (!ensureWifi()) {
@@ -207,19 +214,13 @@ void loop() {
   bool settled = millis() - reportedAt >= SETTLE_MS;
   bool retryDue = lastAttempt == 0 || millis() - lastAttempt >= RETRY_MS;
   if (side >= 0 && side != appliedSide && settled && retryDue && clockSet()) {
-    if (baseline) {
-      baseline = false;
+    const char* activity = side >= 1 && side <= 8 && *SIDES[side - 1] ? SIDES[side - 1] : nullptr;
+    LOG("Side %d: %s", side, activity ? activity : "nothing (stop)");
+    lastAttempt = millis();
+    if (switchTo(activity)) {
       appliedSide = side;
-      LOG("Starting on side %d, waiting for the next flip", side);
-    } else {
-      const char* activity = side >= 1 && side <= 8 && *SIDES[side - 1] ? SIDES[side - 1] : nullptr;
-      LOG("Switching to %s", activity ? activity : "nothing (stop)");
-      lastAttempt = millis();
-      if (switchTo(activity)) {
-        appliedSide = side;
-        lastAttempt = 0;
-        LOG("Done");
-      }
+      lastAttempt = 0;
+      LOG("Done");
     }
   }
   delay(100);

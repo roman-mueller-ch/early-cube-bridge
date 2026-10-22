@@ -2,7 +2,7 @@
 
 ## Why
 
-I track my working time with the EARLY cube: flip it to the side of what I'm working on, put it in the cradle when I stop. Then our IT asked me to remove the EARLY desktop app from my work laptop, which is what the cube talks to over Bluetooth. I didn't want to give up the cube, and pairing it with my phone instead wasn't an option either, so I put a small ESP32 next to it. It does the app's job and talks to EARLY directly. Nothing has to be installed on the work laptop, where I only open the EARLY web app to review my times.
+I track my working time with the [EARLY](https://early.app) cube: flip it to the side of what I'm working on, put it in the cradle when I stop. Then our IT asked me to remove the EARLY desktop app from my work laptop, which is what the cube talks to over Bluetooth. I didn't want to give up the cube, and pairing it with my phone instead wasn't an option either, so I put a small ESP32 next to it. It does the app's job and talks to EARLY directly. Nothing has to be installed on the work laptop, where I only open the EARLY web app to review my times.
 
 ## What it does
 
@@ -14,7 +14,7 @@ Tested with an ESP32 DevKit (ESP-WROOM-32) and a Timeular Tracker (model TZ02K01
 
 The cube needs no pairing. It exposes the side facing up as a single byte (1-8, 0 in the cradle) on characteristic `c7e70012-c847-11e6-8175-8c89a55d403c` (service `c7e70010-…`) and sends an indication on every flip. The bridge waits 2 s for the cube to settle, then calls `POST /tracking/stop` and `POST /tracking/{activityId}/start`. EARLY rejects entries shorter than a minute; those are dropped with `DELETE /tracking`.
 
-After a restart the bridge only takes the current side as a starting point and acts on the next flip, so a restart never touches tracking that was changed in the web app.
+Before switching, the bridge checks `GET /tracking`: if the activity for the side is already running, it leaves it alone. So after a restart or a lost connection the bridge simply syncs EARLY to the cube without splitting the current entry.
 
 ## Setup
 
