@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiMulti.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include "ca.h"
@@ -31,6 +32,53 @@ static WiFiMulti wifi;
 static const char* SIDES[] = SIDE_ACTIVITIES;
 static_assert(sizeof(SIDES) / sizeof(SIDES[0]) == 8, "SIDE_ACTIVITIES needs 8 entries");
 
+// --- Time --------------------------------------------------------------------
+
+// EARLY timestamps are UTC without zone suffix, e.g. "2020-08-03T04:00:00.000".
+static String isoTime(time_t t) {
+  struct tm utc;
+  gmtime_r(&t, &utc);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.000", &utc);
+  return buf;
+}
+
+// Seconds since the epoch for a UTC date (newlib has no timegm).
+static time_t utcEpoch(int year, int month, int day, int hour, int min, int sec) {
+  year -= month <= 2;  // days_from_civil, see howardhinnant.github.io/date_algorithms.html
+  long era = (year >= 0 ? year : year - 399) / 400;
+  long yoe = year - era * 400;
+  long doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = era * 146097 + doe - 719468;
+  return (time_t)days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+static time_t parseIsoTime(const String& s) {  // 0 if unreadable
+  int y, mo, d, h, mi, se;
+  if (sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
+  return utcEpoch(y, mo, d, h, mi, se);
+}
+
+static bool clockSet() { return time(nullptr) > 1700000000; }
+
+// Company networks often block NTP, so the clock is also set from the Date header of the API's
+// responses ("Thu, 22 Oct 2026 17:21:00 GMT"), which is good to a second.
+static void syncClock(const String& date) {
+  static const char MONTHS[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  int day, year, hour, min, sec;
+  char month[4];
+  if (sscanf(date.c_str(), "%*[^,], %d %3s %d %d:%d:%d", &day, month, &year, &hour, &min, &sec) != 6) return;
+  const char* m = strstr(MONTHS, month);
+  if (!m || (m - MONTHS) % 3) return;
+  time_t server = utcEpoch(year, (m - MONTHS) / 3 + 1, day, hour, min, sec);
+  time_t now = time(nullptr);
+  if (now - server <= 2 && server - now <= 2) return;  // close enough, don't fight NTP
+  struct timeval tv = {server, 0};
+  settimeofday(&tv, nullptr);
+  LOG("Clock set from the EARLY API: %s", date.c_str());
+}
+
 // --- EARLY API ---------------------------------------------------------------
 
 static WiFiClientSecure tls;
@@ -41,7 +89,10 @@ static int request(const char* method, const String& path, const String& body, S
   http.begin(tls, String(API) + path);
   http.addHeader("Content-Type", "application/json");
   if (auth) http.addHeader("Authorization", "Bearer " + token);
+  const char* headers[] = {"Date"};
+  http.collectHeaders(headers, 1);
   int code = http.sendRequest(method, (uint8_t*)body.c_str(), body.length());
+  if (code > 0) syncClock(http.header("Date"));
   String res = http.getString();
   http.end();
   if (response) *response = res;
@@ -75,32 +126,6 @@ static int api(const char* method, const String& path, const String& body = "", 
   return code;
 }
 
-// EARLY timestamps are UTC without zone suffix, e.g. "2020-08-03T04:00:00.000".
-static String isoTime(time_t t) {
-  struct tm utc;
-  gmtime_r(&t, &utc);
-  char buf[32];
-  strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S.000", &utc);
-  return buf;
-}
-
-// Seconds since the epoch for a UTC date (newlib has no timegm).
-static time_t utcEpoch(int year, int month, int day, int hour, int min, int sec) {
-  year -= month <= 2;  // days_from_civil, see howardhinnant.github.io/date_algorithms.html
-  long era = (year >= 0 ? year : year - 399) / 400;
-  long yoe = year - era * 400;
-  long doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-  long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  long days = era * 146097 + doe - 719468;
-  return (time_t)days * 86400 + hour * 3600 + min * 60 + sec;
-}
-
-static time_t parseIsoTime(const String& s) {  // 0 if unreadable
-  int y, mo, d, h, mi, se;
-  if (sscanf(s.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return 0;
-  return utcEpoch(y, mo, d, h, mi, se);
-}
-
 static const time_t MIN_ENTRY_S = 60;  // EARLY doesn't keep time entries shorter than a minute
 
 // Makes `activity` the running tracking (nullptr: nothing running) as of `flippedAtMs` (millis()
@@ -115,6 +140,10 @@ static bool switchTo(const char* activity, uint32_t flippedAtMs) {
   if (!running && !activity) return true;
   if (running && activity && current.indexOf(String("\"activity\":{\"id\":\"") + activity + "\"") >= 0) return true;
 
+  if (!clockSet()) {  // neither NTP nor the API's Date header worked
+    LOG("Clock not set");
+    return false;
+  }
   time_t now = time(nullptr);
   time_t at = now - (time_t)((millis() - flippedAtMs) / 1000);
   if (running) {
@@ -235,8 +264,6 @@ static bool ensureWifi() {
   return true;
 }
 
-static bool clockSet() { return time(nullptr) > 1700000000; }
-
 void setup() {
   Serial.begin(115200);
   LOG("EARLY cube bridge");
@@ -274,7 +301,7 @@ void loop() {
   uint32_t flippedAt = reportedAt;
   bool settled = millis() - flippedAt >= SETTLE_MS;
   bool retryDue = lastAttempt == 0 || millis() - lastAttempt >= RETRY_MS;
-  if (side >= 0 && side != appliedSide && settled && retryDue && clockSet()) {
+  if (side >= 0 && side != appliedSide && settled && retryDue) {
     const char* activity = side >= 1 && side <= 8 && *SIDES[side - 1] ? SIDES[side - 1] : nullptr;
     LOG("Side %d: %s", side, activity ? activity : "nothing (stop)");
     lastAttempt = millis();
