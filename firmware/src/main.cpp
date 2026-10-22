@@ -103,9 +103,11 @@ static time_t parseIsoTime(const String& s) {  // 0 if unreadable
 
 static const time_t MIN_ENTRY_S = 60;  // EARLY doesn't keep time entries shorter than a minute
 
-// Makes `activity` the running tracking (nullptr: nothing running). Leaves a matching tracking alone,
-// so syncing after a restart doesn't split the current entry.
-static bool switchTo(const char* activity) {
+// Makes `activity` the running tracking (nullptr: nothing running) as of `flippedAtMs` (millis()
+// when the cube reported the side), so a switch that is retried after an outage still gets the time
+// of the flip. Leaves a matching tracking alone, so syncing after a restart doesn't split the
+// current entry.
+static bool switchTo(const char* activity, uint32_t flippedAtMs) {
   String current;
   int code = api("GET", "/tracking", "", &current);
   if (code != 200 && code != 404) return false;  // 404: nothing running
@@ -114,24 +116,28 @@ static bool switchTo(const char* activity) {
   if (running && activity && current.indexOf(String("\"activity\":{\"id\":\"") + activity + "\"") >= 0) return true;
 
   time_t now = time(nullptr);
+  time_t at = now - (time_t)((millis() - flippedAtMs) / 1000);
   if (running) {
     time_t startedAt = parseIsoTime(jsonString(current, "startedAt"));
     if (!startedAt) {
       LOG("No startedAt in the current tracking: %s", current.substring(0, 200).c_str());
       return false;
     }
-    if (now - startedAt < MIN_ENTRY_S) {
+    // Started after the flip (e.g. in the web app while the bridge was offline): it can't be
+    // stopped before it began, so the cube takes over from now.
+    if (startedAt >= at) at = now;
+    if (at - startedAt < MIN_ENTRY_S) {
       // Too short to become a time entry, so cancel it. Only ever for a tracking we know is
       // this short: a failed stop must never throw away a long entry.
       code = api("DELETE", "/tracking");
       if (code != 200 && code != 404 && code != 409) return false;  // 404/409: already gone
     } else {
-      code = api("POST", "/tracking/stop", "{\"stoppedAt\":\"" + isoTime(now) + "\"}");
+      code = api("POST", "/tracking/stop", "{\"stoppedAt\":\"" + isoTime(at) + "\"}");
       if (code != 200 && code != 409) return false;  // 409: already stopped elsewhere
     }
   }
   if (!activity) return true;
-  code = api("POST", String("/tracking/") + activity + "/start", "{\"startedAt\":\"" + isoTime(now) + "\"}");
+  code = api("POST", String("/tracking/") + activity + "/start", "{\"startedAt\":\"" + isoTime(at) + "\"}");
   return code == 200 || code == 201;
 }
 
@@ -265,13 +271,14 @@ void loop() {
   status = Status::Ok;
 
   int side = reportedSide;
-  bool settled = millis() - reportedAt >= SETTLE_MS;
+  uint32_t flippedAt = reportedAt;
+  bool settled = millis() - flippedAt >= SETTLE_MS;
   bool retryDue = lastAttempt == 0 || millis() - lastAttempt >= RETRY_MS;
   if (side >= 0 && side != appliedSide && settled && retryDue && clockSet()) {
     const char* activity = side >= 1 && side <= 8 && *SIDES[side - 1] ? SIDES[side - 1] : nullptr;
     LOG("Side %d: %s", side, activity ? activity : "nothing (stop)");
     lastAttempt = millis();
-    if (switchTo(activity)) {
+    if (switchTo(activity, flippedAt)) {
       appliedSide = side;
       lastAttempt = 0;
       LOG("Done");
