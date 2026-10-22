@@ -237,18 +237,28 @@ static bool connectCube() {
 }
 
 // --- Status LED --------------------------------------------------------------
-// Fast blink: no WiFi. Slow blink: no cube. Off: all good.
+// Fast blink: no WiFi. Slow blink: no cube. Double blink: the last side couldn't be sent to EARLY
+// (API error or no clock; it is retried). Short flash every 5 s: all good, and the board is alive.
 // Runs in its own task because WiFi, scanning and HTTP calls block the loop for seconds.
 
 static const int LED_PIN = 2;  // blue LED on ESP32 DevKit boards
-enum class Status { NoWifi, NoCube, Ok };
+enum class Status { NoWifi, NoCube, ApiError, Ok };
 static volatile Status status = Status::NoWifi;
+
+static bool ledOn(Status s, uint32_t tick) {  // 100 ms per tick
+  switch (s) {
+    case Status::NoWifi: return tick % 2 == 0;
+    case Status::NoCube: return tick % 10 < 5;
+    case Status::ApiError: return tick % 20 < 2 || (tick % 20 >= 4 && tick % 20 < 6);
+    case Status::Ok: return tick % 50 == 0;
+  }
+  return false;
+}
 
 static void ledTask(void*) {
   pinMode(LED_PIN, OUTPUT);
-  for (uint32_t tick = 0;; tick++) {  // 100 ms per tick
-    bool on = status == Status::NoWifi ? tick % 2 == 0 : status == Status::NoCube ? tick % 10 < 5 : false;
-    digitalWrite(LED_PIN, on);
+  for (uint32_t tick = 0;; tick++) {
+    digitalWrite(LED_PIN, ledOn(status, tick));
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
@@ -285,6 +295,7 @@ void setup() {
 void loop() {
   static int appliedSide = -1;
   static uint32_t lastAttempt = 0;
+  static bool apiFailing = false;
 
   if (!ensureWifi()) {
     delay(5000);
@@ -295,21 +306,23 @@ void loop() {
     if (!connectCube()) delay(2000);
     return;
   }
-  status = Status::Ok;
 
   int side = reportedSide;
   uint32_t flippedAt = reportedAt;
+  if (side == appliedSide) apiFailing = false;  // flipped back, nothing left to send
   bool settled = millis() - flippedAt >= SETTLE_MS;
   bool retryDue = lastAttempt == 0 || millis() - lastAttempt >= RETRY_MS;
   if (side >= 0 && side != appliedSide && settled && retryDue) {
     const char* activity = side >= 1 && side <= 8 && *SIDES[side - 1] ? SIDES[side - 1] : nullptr;
     LOG("Side %d: %s", side, activity ? activity : "nothing (stop)");
     lastAttempt = millis();
-    if (switchTo(activity, flippedAt)) {
+    apiFailing = !switchTo(activity, flippedAt);
+    if (!apiFailing) {
       appliedSide = side;
       lastAttempt = 0;
       LOG("Done");
     }
   }
+  status = apiFailing ? Status::ApiError : Status::Ok;
   delay(100);
 }
