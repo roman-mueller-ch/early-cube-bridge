@@ -4,6 +4,8 @@
 
 I track my working time with the [EARLY](https://early.app) cube: flip it to the side of what I'm working on, put it in the cradle when I stop. Then our IT asked me to remove the EARLY desktop app from my work laptop, which is what the cube talks to over Bluetooth. I didn't want to give up the cube, and pairing it with my phone instead wasn't an option either, so I put a small ESP32 next to it. It does the app's job and talks to EARLY directly. Nothing has to be installed on the work laptop, where I only open the EARLY web app to review my times.
 
+![The EARLY cube and the ESP32 bridge in its 3D-printed case next to the EARLY web app](docs/setup.jpg)
+
 ## What it does
 
 Use the [EARLY](https://early.app) (formerly Timeular) time-tracking cube without the EARLY desktop app. An ESP32 listens to the cube over Bluetooth LE and calls the [EARLY public API](https://developers.early.app/) over WiFi: flipping the cube stops the running entry and starts the activity mapped to the new side. Putting the cube in its cradle stops tracking.
